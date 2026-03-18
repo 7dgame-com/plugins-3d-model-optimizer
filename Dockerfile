@@ -61,7 +61,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install Node.js dependencies
-RUN npm ci --cache /tmp/.npm-cache
+RUN npm install --cache /tmp/.npm-cache
 
 # Copy source code
 COPY . .

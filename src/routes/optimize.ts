@@ -2,7 +2,8 @@
  * Optimize Route
  *
  * Handles 3D model file upload and optimization requests.
- * Supports multiple formats: GLB, GLTF, OBJ, STL, FBX, USDZ
+ * Supports multiple formats: GLB, GLTF, OBJ, STL, FBX, USDZ, ZIP
+ * ZIP files are automatically extracted to find the 3D model inside.
  * Implements POST /api/optimize endpoint.
  *
  * @module routes/optimize
@@ -13,6 +14,7 @@ import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 import { validateGlbBuffer, FILE_CONSTRAINTS } from '../utils/file-validator';
 import { getResultFilePath } from '../utils/storage';
 import { executePipeline } from '../components/optimization-pipeline';
@@ -29,7 +31,10 @@ import logger from '../utils/logger';
 
 const router = Router();
 
-// Configure multer for file uploads
+/** File extensions recognized as 3D model entry points. */
+const MODEL_EXTENSIONS = new Set(SUPPORTED_FORMATS);
+
+// Configure multer for file uploads — accept any single file (zip or model)
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
@@ -37,20 +42,60 @@ const upload = multer({
     fileSize: FILE_CONSTRAINTS.maxSize,
   },
   fileFilter: (_req, file, cb) => {
-    // Check file extension
     const ext = getFileExtension(file.originalname);
-    if (!isSupportedFormat(ext)) {
-      cb(
-        new OptimizationError(ERROR_CODES.INVALID_FILE, `Unsupported file format: ${ext}`, {
-          received: ext,
-          expected: SUPPORTED_FORMATS.join(', '),
-        })
-      );
+    if (ext === '.zip' || isSupportedFormat(ext)) {
+      cb(null, true);
       return;
     }
-    cb(null, true);
+    cb(
+      new OptimizationError(ERROR_CODES.INVALID_FILE, `Unsupported file format: ${ext}`, {
+        received: ext,
+        expected: [...SUPPORTED_FORMATS, '.zip'].join(', '),
+      })
+    );
   },
 });
+
+/**
+ * Extract a ZIP file into tempDir using the system `unzip` command
+ * and return the path to the primary 3D model file found.
+ */
+function extractZipAndFindModel(zipPath: string, tempDir: string): string {
+  // Extract using system unzip (available in the Docker image)
+  execSync(`unzip -o -q "${zipPath}" -d "${tempDir}"`);
+
+  // Walk extracted files to find the primary 3D model
+  function findModelFile(dir: string): string | null {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    // First pass: look for model files in this directory
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const ext = getFileExtension(entry.name);
+        if (MODEL_EXTENSIONS.has(ext as any)) {
+          return path.join(dir, entry.name);
+        }
+      }
+    }
+    // Second pass: recurse into subdirectories
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('__')) {
+        const found = findModelFile(path.join(dir, entry.name));
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  const modelPath = findModelFile(tempDir);
+  if (!modelPath) {
+    throw new OptimizationError(
+      ERROR_CODES.INVALID_FILE,
+      'ZIP 中未找到支持的 3D 模型文件',
+      { expected: [...SUPPORTED_FORMATS].join(', ') }
+    );
+  }
+  return modelPath;
+}
 
 /**
  * @openapi
@@ -58,12 +103,11 @@ const upload = multer({
  *   post:
  *     summary: Upload and optimize a 3D model file
  *     description: |
- *       Upload a 3D model file and apply various optimizations.
- *       Supported formats: GLB, GLTF, OBJ, STL, FBX, USDZ
- *       Non-GLB formats will be automatically converted to GLB before optimization.
- *       Supported optimizations include mesh simplification, Draco compression,
- *       texture compression (KTX2/Basis Universal), vertex quantization,
- *       mesh merging, and resource cleanup.
+ *       Upload a 3D model file (or a ZIP containing the model and its dependencies)
+ *       and apply various optimizations.
+ *       Supported formats: GLB, GLTF, OBJ, STL, FBX, USDZ, ZIP
+ *       ZIP files are automatically extracted; the first supported 3D model found is used.
+ *       This is useful for OBJ files that reference MTL and texture files.
  *     tags:
  *       - Optimization
  *     requestBody:
@@ -78,89 +122,77 @@ const upload = multer({
  *               file:
  *                 type: string
  *                 format: binary
- *                 description: 3D model file to optimize (max 100MB). Supported formats: GLB, GLTF, OBJ, STL
+ *                 description: 3D model file or ZIP archive (max 100MB)
+ *               preset:
+ *                 type: string
+ *                 description: Optimization preset (fast, balanced, maximum)
  *               options:
  *                 type: string
- *                 description: |
- *                   JSON string of optimization options.
- *                   Example: {"simplify":{"enabled":true,"targetRatio":0.5},"draco":{"enabled":true}}
+ *                 description: JSON string of custom optimization options
  *     responses:
  *       200:
  *         description: Optimization successful
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/OptimizationResult'
  *       400:
  *         description: Invalid file or options
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       413:
- *         description: File too large (exceeds 100MB limit)
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
+ *         description: File too large
  *       500:
  *         description: Optimization failed
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post(
   '/',
   upload.single('file'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      // Check if file was uploaded
       if (!req.file) {
-        throw new OptimizationError(ERROR_CODES.INVALID_FILE, 'No file uploaded. Please provide a 3D model file.', {
+        throw new OptimizationError(ERROR_CODES.INVALID_FILE, 'No file uploaded.', {
           field: 'file',
         });
       }
 
       const fileBuffer = req.file.buffer;
-      // Decode filename properly for UTF-8
       const originalFilename = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
       const ext = getFileExtension(originalFilename);
 
-      // Generate task ID
       const taskId = uuidv4();
-
-      // Create temp directory for this task
       const tempDir = path.join('./temp', taskId);
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
+      fs.mkdirSync(tempDir, { recursive: true });
+
+      let uploadedFilePath: string;
+      let modelExt: string;
+
+      if (ext === '.zip') {
+        // Save ZIP then extract and locate the 3D model inside
+        const zipPath = path.join(tempDir, 'upload.zip');
+        fs.writeFileSync(zipPath, fileBuffer);
+        logger.info({ filename: originalFilename }, 'Extracting ZIP archive');
+        uploadedFilePath = extractZipAndFindModel(zipPath, tempDir);
+        modelExt = getFileExtension(uploadedFilePath);
+        logger.info({ model: path.basename(uploadedFilePath), format: modelExt }, 'Found model in ZIP');
+      } else {
+        // Single file upload — save directly
+        uploadedFilePath = path.join(tempDir, `input${ext}`);
+        fs.writeFileSync(uploadedFilePath, fileBuffer);
+        modelExt = ext;
       }
 
-      // Save uploaded file with original extension
-      const uploadedFilePath = path.join(tempDir, `input${ext}`);
-      fs.writeFileSync(uploadedFilePath, fileBuffer);
-
-      // Path for converted GLB (if needed)
       const convertedGlbPath = path.join(tempDir, 'converted.glb');
 
       let inputGlbPath: string;
       let conversionInfo: { converted: boolean; originalFormat: string; conversionTime?: number } = {
         converted: false,
-        originalFormat: ext.toUpperCase().slice(1),
+        originalFormat: modelExt.toUpperCase().slice(1),
       };
 
-      // Convert to GLB if needed
-      if (ext !== '.glb') {
-        const conversionResult = await convertToGLB(uploadedFilePath, convertedGlbPath, originalFilename);
-
+      if (modelExt !== '.glb') {
+        const conversionResult = await convertToGLB(uploadedFilePath, convertedGlbPath, path.basename(uploadedFilePath));
         if (!conversionResult.success) {
           throw new OptimizationError(
             ERROR_CODES.INVALID_FILE,
-            `Failed to convert ${ext} to GLB: ${conversionResult.error}`,
-            { originalFormat: ext, error: conversionResult.error }
+            `Failed to convert ${modelExt} to GLB: ${conversionResult.error}`,
+            { originalFormat: modelExt, error: conversionResult.error }
           );
         }
-
         inputGlbPath = convertedGlbPath;
         conversionInfo = {
           converted: true,
@@ -168,7 +200,6 @@ router.post(
           conversionTime: conversionResult.conversionTime,
         };
       } else {
-        // Validate GLB file format
         const validation = validateGlbBuffer(fileBuffer);
         if (!validation.isValid) {
           throw new OptimizationError(ERROR_CODES.INVALID_FILE, validation.errors.join('; '), {
@@ -178,7 +209,7 @@ router.post(
         inputGlbPath = uploadedFilePath;
       }
 
-      // Parse optimization options (support preset or custom options)
+      // Parse optimization options
       let options: OptimizationOptions = {};
       const presetName = req.body.preset as PresetName | undefined;
       if (presetName) {
@@ -195,7 +226,6 @@ router.post(
       if (req.body.options) {
         try {
           const customOptions = JSON.parse(req.body.options);
-          // If preset was also specified, custom options override preset values
           options = presetName ? { ...options, ...customOptions } : customOptions;
         } catch {
           throw new OptimizationError(ERROR_CODES.INVALID_OPTIONS, 'Invalid options JSON format', {
@@ -205,31 +235,19 @@ router.post(
         }
       }
 
-      // Validate and sanitize options
       const { errors: validationErrors, sanitized } = validateOptions(options);
       if (validationErrors.length > 0) {
         logger.warn({ errors: validationErrors }, 'Options validation warnings');
       }
       options = sanitized;
 
-      // Get output path for result file
       const outputPath = getResultFilePath(taskId);
-
-      // Execute optimization pipeline
       const result = await executePipeline(inputGlbPath, outputPath, options);
 
-      // Override taskId in result to match our generated one
       result.taskId = taskId;
       result.downloadUrl = `/api/download/${taskId}`;
 
-      // Add conversion info to result
-      const extendedResult = {
-        ...result,
-        conversion: conversionInfo,
-      };
-
-      // Return result
-      res.json(extendedResult);
+      res.json({ ...result, conversion: conversionInfo });
     } catch (error) {
       next(error);
     }
