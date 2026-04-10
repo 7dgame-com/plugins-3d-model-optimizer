@@ -12,10 +12,9 @@ import multer from 'multer';
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { Document, NodeIO } from '@gltf-transform/core';
-import { KHRDracoMeshCompression, KHRTextureBasisu } from '@gltf-transform/extensions';
-import { getDracoModules } from '../components/draco-singleton';
+import { Document } from '@gltf-transform/core';
 import { FILE_CONSTRAINTS } from '../utils/file-validator';
+import { createNodeIO } from '../utils/node-io';
 import {
   convertToGLB,
   isSupportedFormat,
@@ -280,9 +279,7 @@ router.post('/', upload.single('file'), async (req: Request, res: Response, next
     }
 
     // Read and analyze GLB
-    const io = new NodeIO()
-      .registerExtensions([KHRDracoMeshCompression, KHRTextureBasisu])
-      .registerDependencies(await getDracoModules());
+    const io = await createNodeIO();
 
     const document = await io.read(glbPath);
     const analysis = await analyzeDocument(document, originalFilename, fileBuffer.length);

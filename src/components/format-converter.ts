@@ -14,6 +14,8 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import obj2gltf from 'obj2gltf';
 
+import { createNodeIO } from '../utils/node-io';
+
 const execAsync = promisify(exec);
 
 /**
@@ -219,7 +221,7 @@ async function convertDAEtoGLB(inputPath: string, outputPath: string): Promise<v
   );
 
   // Convert GLTF to GLB
-  const io = new NodeIO();
+  const io = await createNodeIO();
   const document = await io.read(tempOutput);
   await io.write(outputPath, document);
 
@@ -446,7 +448,7 @@ async function convertOBJtoGLB(inputPath: string, outputPath: string): Promise<v
  * Convert GLTF to GLB.
  */
 async function convertGLTFtoGLB(inputPath: string, outputPath: string): Promise<void> {
-  const io = new NodeIO();
+  const io = await createNodeIO();
   const document = await io.read(inputPath);
   await io.write(outputPath, document);
 }

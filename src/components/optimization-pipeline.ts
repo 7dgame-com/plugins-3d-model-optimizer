@@ -14,8 +14,7 @@
  * @see Requirements 8.1, 8.2, 8.3, 8.4, 8.5
  */
 
-import { Document, NodeIO } from '@gltf-transform/core';
-import { KHRDracoMeshCompression, KHRTextureBasisu } from '@gltf-transform/extensions';
+import { Document } from '@gltf-transform/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -50,7 +49,7 @@ import { quantizeVertices } from './vertex-quantizer';
 import { compressDraco } from './draco-compressor';
 import { compressTextures } from './texture-compressor';
 import { repairInput, repairOutput } from './geometry-fixer';
-import { getDracoModules } from './draco-singleton';
+import { createNodeIO } from '../utils/node-io';
 
 /**
  * Optimization step names in execution order.
@@ -293,9 +292,7 @@ export async function executePipeline(
   }
 
   // Create NodeIO with extensions
-  const io = new NodeIO()
-    .registerExtensions([KHRDracoMeshCompression, KHRTextureBasisu])
-    .registerDependencies(await getDracoModules());
+  const io = await createNodeIO();
 
   // Read the input GLB file
   let document: Document;

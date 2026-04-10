@@ -39,6 +39,7 @@ app.use(cors({
 app.use(helmet({
   contentSecurityPolicy: false, // Disable CSP for static UI with CDN resources
   crossOriginEmbedderPolicy: false,
+  xFrameOptions: false, // Allow the app to be embedded in the platform iframe
 }));
 
 // Gzip compression for all responses
