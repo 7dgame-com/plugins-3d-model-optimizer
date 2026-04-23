@@ -1,5 +1,5 @@
 # 三维模型优化服务 - 支持 KTX2, USDZ, FBX, STEP 和 DAE
-FROM node:20-bookworm-slim
+FROM node:24-bookworm-slim
 
 # Install dependencies for KTX-Software, Python (for USD/STEP), and FBX2glTF
 RUN apt-get update && apt-get install -y \

@@ -158,7 +158,7 @@ Because someone has to be the responsible adult.
 
 ## Tech Stack
 
-- **Runtime**: Node.js 20 / TypeScript
+- **Runtime**: Node.js 24 / TypeScript
 - **Framework**: Express.js
 - **3D Engine**: @gltf-transform/core + extensions
 - **Compression**: Draco3D, KTX-Software (toktx)
